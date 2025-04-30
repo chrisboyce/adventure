@@ -1,150 +1,151 @@
-use std::io;
-
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use ratatui::{
-    DefaultTerminal, Frame,
-    buffer::Buffer,
-    layout::Rect,
-    style::Stylize,
-    symbols::border,
-    text::{Line, Text},
-    widgets::{Block, Paragraph, Widget},
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-fn main() -> io::Result<()> {
-    let mut terminal = ratatui::init();
-    let app_result = App::default().run(&mut terminal);
-    ratatui::restore();
-    app_result
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::Style,
+    widgets::{Block, Borders, Paragraph},
+};
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::{io, time::Duration};
+use tokio::{sync::mpsc, time::sleep};
+
+#[derive(Serialize)]
+struct LLMRequest {
+    model: String,
+    messages: Vec<Message>,
+    options: LLMOptions,
 }
-impl App {
-    /// runs the application's main loop until the user quits
-    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
+
+#[derive(Serialize)]
+struct Message {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct LLMOptions {
+    temperature: f32,
+    response_format: String,
+}
+
+#[derive(Deserialize)]
+struct LLMResponse {
+    message: LLMMessageContent,
+}
+
+#[derive(Deserialize)]
+struct LLMMessageContent {
+    content: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct NPCAction {
+    action: String,
+    target: Option<String>,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let (tx, mut rx) = mpsc::channel::<NPCAction>(1);
+
+    // Start async LLM query
+    tokio::spawn(async move {
+        let action = get_npc_action().await.unwrap_or(NPCAction {
+            action: "error".into(),
+            target: None,
+        });
+        tx.send(action).await.ok();
+    });
+
+    // Default display value
+    let mut current_action = "Waiting for NPC...".to_string();
+
+    loop {
+        terminal.draw(|f| {
+            let size = f.size();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(1)
+                .constraints([Constraint::Min(1)].as_ref())
+                .split(size);
+
+            let para = Paragraph::new(current_action.clone())
+                .block(Block::default().borders(Borders::ALL).title("NPC Decision"))
+                .style(Style::default());
+
+            f.render_widget(para, chunks[0]);
+        })?;
+
+        // Update action if a message arrives
+        if let Ok(action) = rx.try_recv() {
+            current_action = format!(
+                "Action: {}, Target: {}",
+                action.action,
+                action.target.unwrap_or("None".to_string())
+            );
         }
-        Ok(())
-    }
 
-    fn draw(&self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
-    }
-
-    fn handle_events(&mut self) -> io::Result<()> {
-        match event::read()? {
-            // it's important to check that the event is a key press event as
-            // crossterm also emits key release and repeat events on Windows.
-            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                self.handle_key_event(key_event)
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.code == KeyCode::Char('q') {
+                    break;
+                }
             }
-            _ => {}
-        };
-        Ok(())
-    }
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Char('q') => self.exit(),
-            KeyCode::Left => self.decrement_counter(),
-            KeyCode::Right => self.increment_counter(),
-            _ => {}
         }
-    }
-    fn exit(&mut self) {
-        self.exit = true;
+
+        sleep(Duration::from_millis(16)).await;
     }
 
-    fn increment_counter(&mut self) {
-        self.counter += 1;
-    }
-
-    fn decrement_counter(&mut self) {
-        self.counter -= 1;
-    }
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
 }
-#[derive(Debug, Default)]
-pub struct App {
-    counter: u8,
-    exit: bool,
-}
-pub struct TopDown;
-impl Widget for &TopDown {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        todo!()
-    }
-}
-impl Widget for &App {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = Line::from(" Counter App Tutorial ".bold());
-        let instructions = Line::from(vec![
-            " Decrement ".into(),
-            "<Left>".blue().bold(),
-            " Increment ".into(),
-            "<Right>".blue().bold(),
-            " Quit ".into(),
-            "<Q> ".blue().bold(),
-        ]);
-        let block = Block::bordered()
-            .title(title.centered())
-            .title_bottom(instructions.centered())
-            .border_set(border::THICK);
 
-        let counter_text = Text::from(vec![Line::from(vec![
-            "Value: ".into(),
-            self.counter.to_string().yellow(),
-        ])]);
+async fn get_npc_action() -> Result<NPCAction, Box<dyn std::error::Error>> {
+    let client = Client::new();
 
-        let cell = buf.cell_mut((10, 10));
-        if let Some(cell) = cell {
-            cell.set_char('!');
-        }
-        // Paragraph::new(counter_text)
-        //     .centered()
-        //     .block(block)
-        //     .render(area, buf);
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::style::Style;
+    let prompt = r#"
+You are an NPC in a tile-based game. Your goal is to explore. You see walls north and west, paths elsewhere.
+Respond ONLY in this JSON format: { "action": "move", "target": "south" }
+"#;
 
-    #[test]
-    fn render() {
-        let app = App::default();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 4));
+    let request = LLMRequest {
+        model: "gemma3".to_string(),
+        messages: vec![Message {
+            role: "user".into(),
+            content: prompt.into(),
+        }],
+        options: LLMOptions {
+            temperature: 0.7,
+            response_format: "json".to_string(),
+        },
+    };
 
-        app.render(buf.area, &mut buf);
+    let response: LLMResponse = client
+        .post("http://localhost:11434/api/chat")
+        .json(&request)
+        .send()
+        .await?
+        .json()
+        .await?;
 
-        let mut expected = Buffer::with_lines(vec![
-            "┏━━━━━━━━━━━━━ Counter App Tutorial ━━━━━━━━━━━━━┓",
-            "┃                    Value: 0                    ┃",
-            "┃                                                ┃",
-            "┗━ Decrement <Left> Increment <Right> Quit <Q> ━━┛",
-        ]);
-        let title_style = Style::new().bold();
-        let counter_style = Style::new().yellow();
-        let key_style = Style::new().blue().bold();
-        expected.set_style(Rect::new(14, 0, 22, 1), title_style);
-        expected.set_style(Rect::new(28, 1, 1, 1), counter_style);
-        expected.set_style(Rect::new(13, 3, 6, 1), key_style);
-        expected.set_style(Rect::new(30, 3, 7, 1), key_style);
-        expected.set_style(Rect::new(43, 3, 4, 1), key_style);
-
-        assert_eq!(buf, expected);
-    }
-    #[test]
-    fn handle_key_event() -> io::Result<()> {
-        let mut app = App::default();
-        app.handle_key_event(KeyCode::Right.into());
-        assert_eq!(app.counter, 1);
-
-        app.handle_key_event(KeyCode::Left.into());
-        assert_eq!(app.counter, 0);
-
-        let mut app = App::default();
-        app.handle_key_event(KeyCode::Char('q').into());
-        assert!(app.exit);
-
-        Ok(())
-    }
+    let action: NPCAction = serde_json::from_str(&response.message.content)?;
+    Ok(action)
 }
