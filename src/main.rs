@@ -66,6 +66,12 @@ pub struct App {
     counter: u8,
     exit: bool,
 }
+pub struct TopDown;
+impl Widget for &TopDown {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        todo!()
+    }
+}
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let title = Line::from(" Counter App Tutorial ".bold());
@@ -87,10 +93,14 @@ impl Widget for &App {
             self.counter.to_string().yellow(),
         ])]);
 
-        Paragraph::new(counter_text)
-            .centered()
-            .block(block)
-            .render(area, buf);
+        let cell = buf.cell_mut((10, 10));
+        if let Some(cell) = cell {
+            cell.set_char('!');
+        }
+        // Paragraph::new(counter_text)
+        //     .centered()
+        //     .block(block)
+        //     .render(area, buf);
     }
 }
 #[cfg(test)]
