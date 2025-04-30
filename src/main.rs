@@ -1,19 +1,14 @@
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::Style,
     widgets::{Block, Borders, Paragraph},
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{io, time::Duration};
+use std::{fs::File, io::BufWriter, time::Duration};
 use tokio::{sync::mpsc, time::sleep};
+use tracing::info;
 
 #[derive(Serialize)]
 struct LLMRequest {
@@ -52,15 +47,19 @@ struct NPCAction {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let log_file = File::create("npc_debug.log")?;
+    let log_writer = BufWriter::new(log_file);
+
+    tracing_subscriber::fmt()
+        // .with_writer(std::fs::File::create("debug.log"))
+        // .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    info!("Application started");
+    let mut terminal = ratatui::init();
 
     let (tx, mut rx) = mpsc::channel::<NPCAction>(1);
 
-    // Start async LLM query
     tokio::spawn(async move {
         let action = get_npc_action().await.unwrap_or(NPCAction {
             action: "error".into(),
@@ -108,13 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sleep(Duration::from_millis(16)).await;
     }
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    ratatui::restore();
     Ok(())
 }
 
