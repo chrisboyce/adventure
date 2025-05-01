@@ -1,8 +1,9 @@
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout},
     style::Style,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,7 @@ impl GameMap {
         // Add some walls for testing
         // tiles[1][1] = Tile::Wall;
         tiles[1][1] = Tile::Item(Item::Treasure);
+        tiles[3][3] = Tile::Character(Character::NPC);
         GameMap {
             width,
             height,
@@ -106,6 +108,25 @@ impl GameMap {
             self.tiles[y as usize][x as usize]
         } else {
             Tile::Wall
+        }
+    }
+}
+impl Widget for &GameMap {
+    fn render(self, area: ratatui::prelude::Rect, buf: &mut ratatui::prelude::Buffer) {
+        for x in area.left()..(area.right().min(self.width as u16)) {
+            for y in area.top()..(area.bottom().min(self.height as u16)) {
+                // let char = self.
+                let tile_graphic = match &self.tiles[x as usize][y as usize] {
+                    Tile::Wall => '▦',
+                    Tile::Path => '░',
+                    Tile::Item(item) => 'I',
+                    Tile::Character(character) => '╂',
+                    Tile::Unknown => '?',
+                };
+                buf.cell_mut((x, y))
+                    .expect("Failed to fetch cell")
+                    .set_char(tile_graphic);
+            }
         }
     }
 }
@@ -178,19 +199,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_action = "Waiting for NPC...".to_string();
 
     loop {
-        terminal.draw(|f| {
-            let size = f.size();
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(1)
-                .constraints([Constraint::Min(1)].as_ref())
-                .split(size);
+        terminal.draw(|frame| {
+            let layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(frame.area());
+            frame.render_widget(&GameMap::new(5, 5), layout[0]);
+            frame.render_widget(
+                Paragraph::new(current_action.clone()).block(Block::new().borders(Borders::ALL)),
+                layout[1],
+            );
+            // let size = frame.size();
+            // let chunks = Layout::default()
+            //     .direction(Direction::Vertical)
+            //     .margin(1)
+            //     .constraints([Constraint::Min(1)].as_ref())
+            //     .split(size);
 
-            let para = Paragraph::new(current_action.clone())
-                .block(Block::default().borders(Borders::ALL).title("NPC Decision"))
-                .style(Style::default());
+            // let para = Paragraph::new(current_action.clone())
+            //     .block(Block::default().borders(Borders::ALL).title("NPC Decision"))
+            //     .style(Style::default());
 
-            f.render_widget(para, chunks[0]);
+            // frame.render_widget(para, chunks[0]);
         })?;
 
         // Update action if a message arrives
@@ -221,7 +251,7 @@ async fn get_npc_action() -> Result<NPCAction, Box<dyn std::error::Error>> {
     let client = Client::new();
 
     let map = GameMap::new(5, 5);
-    let npc = NPC { x: 2, y: 2 };
+    let npc = NPC { x: 3, y: 3 };
     let view = npc.visible_tiles(&map);
     let prompt = generate_prompt_from_view(view);
     info!("Prompt: {prompt}");
@@ -262,3 +292,4 @@ async fn get_npc_action() -> Result<NPCAction, Box<dyn std::error::Error>> {
     let action: NPCAction = serde_json::from_str(json_string)?;
     Ok(action)
 }
+fn render(frame: &mut Frame<'_>) {}
