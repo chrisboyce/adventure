@@ -13,6 +13,7 @@ use tracing::info;
 #[derive(Serialize)]
 struct LLMRequest {
     model: String,
+    stream: bool,
     messages: Vec<Message>,
     options: LLMOptions,
 }
@@ -50,8 +51,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_file = File::create("npc_debug.log")?;
     let log_writer = BufWriter::new(log_file);
 
+    let file_appender = tracing_appender::rolling::daily("/tmp", "prefix.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
-        // .with_writer(std::fs::File::create("debug.log"))
+        .with_writer(non_blocking)
         // .with_env_filter(EnvFilter::from_default_env())
         .init();
 
@@ -121,6 +124,7 @@ Respond ONLY in this JSON format: { "action": "move", "target": "south" }
 
     let request = LLMRequest {
         model: "gemma3".to_string(),
+        stream: false,
         messages: vec![Message {
             role: "user".into(),
             content: prompt.into(),
@@ -131,14 +135,29 @@ Respond ONLY in this JSON format: { "action": "move", "target": "south" }
         },
     };
 
-    let response: LLMResponse = client
+    // let response: LLMResponse = client
+    //     .post("http://localhost:11434/api/chat")
+    //     .json(&request)
+    //     .send()
+    //     .await?
+    //     .json()
+    //     .await?;
+    let res = client
         .post("http://localhost:11434/api/chat")
         .json(&request)
         .send()
-        .await?
-        .json()
         .await?;
 
-    let action: NPCAction = serde_json::from_str(&response.message.content)?;
+    let text = res.text().await?;
+    info!("Raw LLM response text: [{}]", text);
+
+    let response: LLMResponse = serde_json::from_str(&text)?;
+    info!("Contents [{}]", &response.message.content);
+    let content = &response.message.content;
+    let opening = content.find("{").unwrap();
+    let closing = content.rfind("}").unwrap();
+    let json_string = &content[opening..=closing];
+
+    let action: NPCAction = serde_json::from_str(json_string)?;
     Ok(action)
 }
