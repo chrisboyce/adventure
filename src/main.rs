@@ -46,6 +46,109 @@ struct NPCAction {
     target: Option<String>,
 }
 
+struct GameMap {
+    width: usize,
+    height: usize,
+    tiles: Vec<Vec<Tile>>,
+}
+#[derive(Clone, Copy, Debug)]
+enum Tile {
+    Wall,
+    Path,
+    Item(Item),
+    Character(Character),
+    Unknown,
+}
+#[derive(Clone, Debug, Copy)]
+enum Item {
+    Key,
+    Chest,
+    Treasure,
+}
+#[derive(Clone, Debug, Copy)]
+enum Character {
+    Player,
+    NPC,
+    Enemy,
+}
+#[derive(Debug, Clone)]
+struct NPC {
+    x: isize,
+    y: isize,
+}
+
+impl NPC {
+    fn visible_tiles(&self, map: &GameMap) -> [[Tile; 3]; 3] {
+        let mut view = [[Tile::Unknown; 3]; 3];
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                view[(dy + 1) as usize][(dx + 1) as usize] = map.get_tile(self.x + dx, self.y + dy);
+            }
+        }
+        view
+    }
+}
+impl GameMap {
+    fn new(width: usize, height: usize) -> Self {
+        let mut tiles = vec![vec![Tile::Path; width]; height];
+        // Add some walls for testing
+        // tiles[1][1] = Tile::Wall;
+        tiles[1][1] = Tile::Item(Item::Treasure);
+        GameMap {
+            width,
+            height,
+            tiles,
+        }
+    }
+
+    fn get_tile(&self, x: isize, y: isize) -> Tile {
+        if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
+            self.tiles[y as usize][x as usize]
+        } else {
+            Tile::Wall
+        }
+    }
+}
+fn generate_prompt_from_view(view: [[Tile; 3]; 3]) -> String {
+    let mut description = String::from(
+        "You are an NPC in a tile-based game. \
+        You are seeking treasure. If you see \
+        treasure, you should move towards it. \
+        Here's what you see:\n",
+    );
+
+    for (dy, row) in view.iter().enumerate() {
+        for (dx, tile) in row.iter().enumerate() {
+            let direction = match (dy as isize - 1, dx as isize - 1) {
+                (-1, 0) => "north",
+                (1, 0) => "south",
+                (0, -1) => "west",
+                (0, 1) => "east",
+                (-1, -1) => "northwest",
+                (-1, 1) => "northeast",
+                (1, -1) => "southwest",
+                (1, 1) => "southeast",
+                (0, 0) => "your current position",
+                _ => "somewhere",
+            };
+
+            let desc = match tile {
+                Tile::Wall => "a wall",
+                Tile::Path => "a path",
+                Tile::Item(c) => &format!("An item: {:?}", c),
+                Tile::Character(c) => &format!("Another character '{:?}'", c),
+                Tile::Unknown => "unknown terrain",
+            };
+
+            description.push_str(&format!("- To the {}: {}\n", direction, desc));
+        }
+    }
+
+    description.push_str("Respond in JSON: { \"action\": \"move\", \"target\": DIRECTION }");
+    info!("View: \n{:?}", description);
+    description
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let log_file = File::create("npc_debug.log")?;
@@ -117,10 +220,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn get_npc_action() -> Result<NPCAction, Box<dyn std::error::Error>> {
     let client = Client::new();
 
-    let prompt = r#"
-You are an NPC in a tile-based game. Your goal is to explore. You see walls north and west, paths elsewhere.
-Respond ONLY in this JSON format: { "action": "move", "target": "south" }
-"#;
+    let map = GameMap::new(5, 5);
+    let npc = NPC { x: 2, y: 2 };
+    let view = npc.visible_tiles(&map);
+    let prompt = generate_prompt_from_view(view);
+    info!("Prompt: {prompt}");
+    //     let prompt = r#"
+    // You are an NPC in a tile-based game. Your goal is to explore. You see walls north and west, paths elsewhere.
+    // Respond ONLY in this JSON format: { "action": "move", "target": "south" }
+    // "#;
 
     let request = LLMRequest {
         model: "gemma3".to_string(),
@@ -135,13 +243,6 @@ Respond ONLY in this JSON format: { "action": "move", "target": "south" }
         },
     };
 
-    // let response: LLMResponse = client
-    //     .post("http://localhost:11434/api/chat")
-    //     .json(&request)
-    //     .send()
-    //     .await?
-    //     .json()
-    //     .await?;
     let res = client
         .post("http://localhost:11434/api/chat")
         .json(&request)
