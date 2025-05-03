@@ -1,44 +1,124 @@
 use crossterm::event::{self, Event, KeyCode};
+use llm::{LLMOptions, LLMResponse, Message};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
-    style::Style,
+    buffer::Buffer,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
     widgets::{Block, Borders, Paragraph, Widget},
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{fs::File, io::BufWriter, time::Duration};
+use std::{
+    cmp::{max, min},
+    fs::File,
+    io::BufWriter,
+    time::Duration,
+};
 use tokio::{sync::mpsc, time::sleep};
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
-#[derive(Serialize)]
-struct LLMRequest {
-    model: String,
-    stream: bool,
-    messages: Vec<Message>,
-    options: LLMOptions,
+pub struct WorldMapWidget<'a> {
+    game_state: &'a GameState,
+    center_x: i32,
+    center_y: i32,
 }
+impl<'a> Widget for WorldMapWidget<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let GameState {
+            world:
+                GameMap {
+                    width,
+                    height,
+                    tiles,
+                    agents,
+                },
+        } = self.game_state;
 
-#[derive(Serialize)]
-struct Message {
-    role: String,
-    content: String,
+        let map_height = *height as i32;
+        let map_width = *width as i32;
+
+        let view_width = area.width as i32;
+        let view_height = area.height as i32;
+
+        let min_x = max(0, self.center_x - view_width / 2);
+        let min_y = max(0, self.center_y - view_height / 2);
+        let max_x = min(map_width, min_x + view_width);
+        let max_y = min(map_height, min_y + view_height);
+
+        let mut agent_positions = vec![vec![None; map_width as usize]; map_height as usize];
+        for agent in agents {
+            if agent.y >= 0 && agent.y < map_height && agent.x >= 0 && agent.x < map_width {
+                agent_positions[agent.y as usize][agent.x as usize] =
+                    Some(agent.id.chars().next().unwrap_or('@'));
+            }
+        }
+
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let screen_x = (x - min_x) as u16 + area.x;
+                let screen_y = (y - min_y) as u16 + area.y;
+
+                let symbol = if let Some(ch) = agent_positions[y as usize][x as usize] {
+                    ch.to_string()
+                } else {
+                    match tiles[y as usize][x as usize] {
+                        Tile::Wall => "█".to_string(),
+                        Tile::Empty => ".".to_string(),
+                        Tile::Path => "~".to_string(),
+                        Tile::Item(_) => "$".to_string(),
+                        Tile::Character(character) => todo!(),
+                        Tile::Unknown => todo!(),
+                    }
+                };
+
+                let style = match tiles[y as usize][x as usize] {
+                    Tile::Wall => Style::default().fg(Color::DarkGray),
+                    Tile::Item(_) => Style::default().fg(Color::Yellow),
+                    Tile::Empty => Style::default().fg(Color::White),
+                    Tile::Path => Style::default().fg(Color::Gray),
+                    Tile::Character(character) => todo!(),
+                    Tile::Unknown => todo!(),
+                };
+
+                buf.set_string(screen_x, screen_y, symbol, style);
+            }
+        }
+    }
 }
+mod llm {
+    use derive_builder::Builder;
+    use serde::{Deserialize, Serialize};
+    const MODEL: &'static str = "gemma3";
+    #[derive(Serialize)]
+    pub(crate) struct LLMRequest {
+        pub(crate) model: String,
+        pub(crate) stream: bool,
+        pub(crate) messages: Vec<Message>,
+        pub(crate) options: LLMOptions,
+    }
+    #[derive(Serialize)]
+    pub(crate) struct Message {
+        pub(crate) role: String,
+        pub(crate) content: String,
+    }
 
-#[derive(Serialize)]
-struct LLMOptions {
-    temperature: f32,
-    response_format: String,
-}
+    #[derive(Serialize)]
+    pub(crate) struct LLMOptions {
+        pub(crate) temperature: f32,
+        pub(crate) response_format: String,
+    }
 
-#[derive(Deserialize)]
-struct LLMResponse {
-    message: LLMMessageContent,
-}
+    #[derive(Deserialize)]
+    pub(crate) struct LLMResponse {
+        pub(crate) message: LLMMessageContent,
+    }
 
-#[derive(Deserialize)]
-struct LLMMessageContent {
-    content: String,
+    #[derive(Deserialize)]
+    pub(crate) struct LLMMessageContent {
+        pub(crate) content: String,
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -47,26 +127,61 @@ struct NPCAction {
     target: Option<String>,
 }
 
+struct Context {
+    previous_state: Option<GameState>,
+    state: GameState,
+}
+impl Context {
+    /// Move the current state into the previous state, and record the new
+    /// state.
+    pub fn update_state(&mut self, state: GameState) {
+        self.previous_state = Some(std::mem::replace(&mut self.state, state));
+    }
+}
+#[derive(Serialize, Deserialize, Debug)]
+struct GameState {
+    world: GameMap,
+}
+impl Default for GameState {
+    fn default() -> Self {
+        Self {
+            world: GameMap::new(32, 16),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 struct GameMap {
     width: usize,
     height: usize,
     tiles: Vec<Vec<Tile>>,
+    agents: Vec<Agent>,
 }
-#[derive(Clone, Copy, Debug)]
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Agent {
+    pub id: String,
+    pub x: i32,
+    pub y: i32,
+}
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 enum Tile {
     Wall,
     Path,
     Item(Item),
     Character(Character),
     Unknown,
+    Empty,
 }
-#[derive(Clone, Debug, Copy)]
+
+#[derive(Serialize, Deserialize, Clone, Debug, Copy)]
 enum Item {
     Key,
     Chest,
     Treasure,
 }
-#[derive(Clone, Debug, Copy)]
+
+#[derive(Serialize, Deserialize, Clone, Debug, Copy)]
 enum Character {
     Player,
     NPC,
@@ -74,8 +189,8 @@ enum Character {
 }
 #[derive(Debug, Clone)]
 struct NPC {
-    x: isize,
-    y: isize,
+    x: i32,
+    y: i32,
 }
 
 impl NPC {
@@ -94,16 +209,17 @@ impl GameMap {
         let mut tiles = vec![vec![Tile::Path; width]; height];
         // Add some walls for testing
         // tiles[1][1] = Tile::Wall;
-        tiles[1][1] = Tile::Item(Item::Treasure);
-        tiles[3][3] = Tile::Character(Character::NPC);
+        tiles[2][2] = Tile::Item(Item::Treasure);
+        // tiles[2][2] = Tile::Character(Character::NPC);
         GameMap {
             width,
             height,
             tiles,
+            agents: vec![],
         }
     }
 
-    fn get_tile(&self, x: isize, y: isize) -> Tile {
+    fn get_tile(&self, x: i32, y: i32) -> Tile {
         if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
             self.tiles[y as usize][x as usize]
         } else {
@@ -122,6 +238,7 @@ impl Widget for &GameMap {
                     Tile::Item(item) => 'I',
                     Tile::Character(character) => '╂',
                     Tile::Unknown => '?',
+                    Tile::Empty => todo!(),
                 };
                 buf.cell_mut((x, y))
                     .expect("Failed to fetch cell")
@@ -159,6 +276,7 @@ fn generate_prompt_from_view(view: [[Tile; 3]; 3]) -> String {
                 Tile::Item(c) => &format!("An item: {:?}", c),
                 Tile::Character(c) => &format!("Another character '{:?}'", c),
                 Tile::Unknown => "unknown terrain",
+                Tile::Empty => todo!(),
             };
 
             description.push_str(&format!("- To the {}: {}\n", direction, desc));
@@ -172,20 +290,18 @@ fn generate_prompt_from_view(view: [[Tile; 3]; 3]) -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let log_file = File::create("npc_debug.log")?;
-    let log_writer = BufWriter::new(log_file);
-
-    let file_appender = tracing_appender::rolling::daily("/tmp", "prefix.log");
+    let file_appender = tracing_appender::rolling::daily("/tmp", "llm_log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
         .with_writer(non_blocking)
-        // .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::from_default_env())
         .init();
 
     info!("Application started");
     let mut terminal = ratatui::init();
 
     let (tx, mut rx) = mpsc::channel::<NPCAction>(1);
+    let state = GameState::default();
 
     tokio::spawn(async move {
         let action = get_npc_action().await.unwrap_or(NPCAction {
@@ -204,23 +320,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .direction(Direction::Horizontal)
                 .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(frame.area());
-            frame.render_widget(&GameMap::new(5, 5), layout[0]);
+            // frame.render_widget(&GameMap::new(5, 5), layout[0]);
+            frame.render_widget(
+                WorldMapWidget {
+                    game_state: &state,
+                    center_x: 2,
+                    center_y: 2,
+                },
+                layout[0],
+            );
             frame.render_widget(
                 Paragraph::new(current_action.clone()).block(Block::new().borders(Borders::ALL)),
                 layout[1],
             );
-            // let size = frame.size();
-            // let chunks = Layout::default()
-            //     .direction(Direction::Vertical)
-            //     .margin(1)
-            //     .constraints([Constraint::Min(1)].as_ref())
-            //     .split(size);
-
-            // let para = Paragraph::new(current_action.clone())
-            //     .block(Block::default().borders(Borders::ALL).title("NPC Decision"))
-            //     .style(Style::default());
-
-            // frame.render_widget(para, chunks[0]);
         })?;
 
         // Update action if a message arrives
@@ -260,7 +372,7 @@ async fn get_npc_action() -> Result<NPCAction, Box<dyn std::error::Error>> {
     // Respond ONLY in this JSON format: { "action": "move", "target": "south" }
     // "#;
 
-    let request = LLMRequest {
+    let request = llm::LLMRequest {
         model: "gemma3".to_string(),
         stream: false,
         messages: vec![Message {
